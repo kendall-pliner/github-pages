@@ -1,0 +1,437 @@
+---
+title: "2025 World Series Simulation"
+author: "Kendall Pliner"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(baseballr)
+library(dplyr)
+library(purrr)
+library(readr)
+```
+
+```{r}
+season <- 2025
+seasonTable <- tibble()
+days <- seq(from = as.Date(paste0(season, "-03-18")),
+            to   = as.Date(paste0(season, "-09-28")),
+            by   = "2 days")
+
+for (i in seq_along(days)) {
+  print(paste(days[i], "to", days[i] + 1))
+
+  currentPeriod <- tryCatch(
+    scrape_statcast_savant(start_date = days[i], end_date = days[i] + 1,
+                           player_type = "batter"),
+    error = function(e) NULL
+  )
+
+  if (is.null(currentPeriod) || nrow(currentPeriod) == 0) {
+    Sys.sleep(1)
+    next
+  }
+
+  currentPeriod$outs_when_up <- as.numeric(currentPeriod$outs_when_up)
+  currentPeriod$game_type    <- ifelse(currentPeriod$game_type == FALSE, "", currentPeriod$game_type)
+  currentPeriod$inning       <- as.integer(currentPeriod$inning)
+  currentPeriod$pitch_number <- as.integer(currentPeriod$pitch_number)
+  currentPeriod$break_angle_deprecated  <- as.logical(currentPeriod$break_angle_deprecated)
+  currentPeriod$break_length_deprecated <- as.logical(currentPeriod$break_length_deprecated)
+  currentPeriod$game_year    <- as.integer(currentPeriod$game_year)
+
+  seasonTable <- bind_rows(seasonTable, currentPeriod)
+  Sys.sleep(2)
+}
+
+seasonTable <- arrange(seasonTable, game_date)
+write_csv(seasonTable, paste0("statcast_data", season, ".csv"))
+
+```
+
+
+```{r}
+data <- read_csv("statcast_data2025.csv")
+data
+
+```
+
+```{r}
+# Lineup Options
+
+LAD_SL <- c("Mookie Betts", "Shohei Ohtani","Freddie Freeman",
+            "Will Smith", "Teoscar Hernandez", "Max Muncy", "Kike Hernandez","Tommy Edman",
+            "Andy Pages", "Alex Call", "Miguel Rojas")
+LAD_SP <- c("Blake Snell", "Yoshinobu Yamamoto", "Tyler Glasnow","Shohei Ohtani")
+LAD_allowed <- list(
+  "Mookie Betts" = 1:2,
+  "Shohei Ohtani" = 1,
+  "Freddie Freeman" = 3:4,
+  "Will Smith" = 5:6,
+  "Teoscar Hernandez" = 4:6,
+  "Max Muncy" = 4:6,
+  "Kike Hernandez" = 7:9,
+  "Tommy Edman" = 5:7,
+  "Andy Pages" = 6:9,
+  "Alex Call" = 7:9,
+  "Miguel Rojas" = 8:9
+)
+
+
+
+TOR_SL <- c("George Springer", "Nathan Lukes", "Vladimir Guerrero Jr.", "Bo Bichette",
+            "Daulton Varsho", "Alejandro Kirk","Addison Barger", "Ernie Clement", 
+            "Andres Gimenez", "Isiah Kiner-Falefa", "Davis Schneider", "Myles Straw")
+TOR_SP <- c("Trey Yesavage", "Kevin Gausman", "Max Scherzer", "Shane Bieber")
+TOR_allowed <- list(
+  "George Springer" = 1:4,
+  "Nathan Lukes" = 1:9,
+  "Vladimir Guerrero Jr." = 2:3,
+  "Bo Bichette" = 1:3,
+  "Daulton Varsho" = 4:6,
+  "Alejandro Kirk" = 4:7,
+  "Addison Barger" = 2:8,
+  "Ernie Clement" = 7:9,
+  "Andres Gimenez" = 2:9,
+  "Isiah Kiner-Falefa" = 7:9,
+  "Davis Schneider" = 1:9,
+  "Myles Straw" = 8:9
+)
+
+generate_valid_lineups <- function(player_pool, allowed_slots) {
+  used <- setNames(rep(FALSE, length(player_pool)), player_pool)
+  curr <- character(9)
+
+  dfs <- function(pos) {
+    if (pos > 9L) return(TRUE)
+    
+    for (p in sample(player_pool)){
+      if (!used[[p]] && pos %in% allowed_slots[[p]]) {
+        used[[p]] <<- TRUE
+        curr[pos] <<- p
+        if (dfs(pos + 1L)) return(TRUE)
+        used[[p]] <<- FALSE
+      }
+    }
+    FALSE
+  }
+  dfs(1L)
+  curr
+}
+
+game_lineup <- function(team){
+  if(team == "LAD") generate_valid_lineups(LAD_SL, LAD_allowed) else
+    generate_valid_lineups(TOR_SL, TOR_allowed)
+}
+
+generate_valid_lineups(LAD_SL, LAD_allowed)
+generate_valid_lineups(TOR_SL, TOR_allowed)
+
+```
+
+```{r}
+OUTCOMES <- c("single", "double", "triple", "home_run", "walk", "strikeout", "out")
+
+pa <- data %>%
+  filter(!is.na(events)) %>%
+  mutate(outcome = case_when(
+    events == "single" ~ "single",
+    events == "double" ~ "double",
+    events == "triple"   ~ "triple",
+    events == "home_run" ~ "home_run",
+    events %in% c("walk", "hit_by_pitch", "intent_walk") ~ "walk",
+    events %in% c("strikeout", "strikeout_double_play")  ~ "strikeout",
+    events %in% c("field_out", "force_out", "grounded_into_double_play",
+                  "double_play", "fielders_choice", "fielders_choice_out",
+                  "sac_fly", "sac_bunt", "sac_fly_double_play",
+                  "sac_bunt_double_play", "triple_play") ~ "out",
+    TRUE ~ NA_character_ )) %>%
+  filter(!is.na(outcome))
+
+lg <- as.numeric(prop.table(table(factor(pa$outcome, levels = OUTCOMES))))
+names(lg) <- OUTCOMES
+round(lg, 3)
+
+prior_pa <- 100
+shrunk_rates <- function(outcomes){
+  counts <- as.numeric(table(factor(outcomes, levels = OUTCOMES )))
+  setNames((counts + prior_pa*lg)/ (sum(counts) + prior_pa), OUTCOMES)
+}
+
+
+
+
+
+
+```
+
+```{r}
+clean_name <- function(x) {
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+  x <- tolower(x)
+  x <- gsub("[^a-z ]", "", x)
+  x <- gsub("\\b(jr|sr|ii|iii)\\b", "", x)
+  trimws(gsub("\\s+", " ", x))
+}
+
+name_change <- c("kike hernandez" = "enrique hernandez")
+
+people <- chadwick_player_lu() %>%
+  filter(key_mlbam %in% unique(c(data$batter, data$pitcher))) %>%
+  transmute(id = key_mlbam,
+            full1 = clean_name(paste(name_first, name_last)),
+            full2 = clean_name(paste(name_given, name_last)))
+
+find_id <- function(name, role) {
+  key <- clean_name(name)
+  if(key %in% names(name_change)) key <- name_change[[key]]
+  ids <- unique(people$id[people$full1 == key | people$full2 == key]) 
+  if(length(ids) == 0){
+    warning("No MLBAM id found for", name, " -- using league average")
+    return(NA_real_)
+  }
+  if(length(ids) > 1) {
+    n_pa <- vapply(ids, function(i) as.numeric(sum(pa[[role]] == i)), numeric(1))
+    ids <- ids[which.max(n_pa)]
+  }
+  ids
+}
+
+build_rates <- function(names_vec, role){
+  rates <- lapply(names_vec, function(nm){
+    id <- find_id(nm, role)
+    if(is.na(id)) return(lg)
+    shrunk_rates(pa$outcome[pa[[role]] == id])
+  })
+  setNames(rates, names_vec)
+}
+
+batter_rates <- build_rates(unique(c(LAD_SL, TOR_SL)), "batter")
+pitcher_rates <- build_rates(unique(c(LAD_SP, TOR_SP)), "pitcher")
+pitcher_rates[["BULLPEN"]] <- lg
+
+bind_rows(lapply(batter_rates, as.list), .id = "player") %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+matchup_prob <- function(batter, pitcher){
+  x <- batter_rates[[batter]] * pitcher_rates[[pitcher]] / lg
+  x/ sum(x)
+  
+}
+
+```
+
+
+```{r}
+hit_values <- c(single = 1, double = 2, triple = 3, home_run = 4)
+
+get_bullpen_decision <- function(current_pitcher, pitch_count, inning){
+  is_starter <- current_pitcher %in% c(LAD_SP, TOR_SP)
+  if(is_starter && (pitch_count >= 85 || inning >= 6)) return("BULLPEN")
+  current_pitcher
+}
+
+simulate_game <- function(away_team, home_team, away_starter, home_starter) {
+  lineups <- list(away = game_lineup(away_team), home = game_lineup(home_team))
+  team_name <- c(away = away_team, home = home_team)
+  
+  runs <- c(away = 0, home = 0)
+  hits <- c(away = 0, home = 0)
+  strikeouts <- c(away = 0, home = 0)
+  
+  lineup_idx <- c(away = 1, home = 1)
+  pitcher <- c(away = away_starter, home = home_starter)
+  pitch_count <- c(away = 0, home = 0)
+  bullpen_entries <- list()
+  points <- setNames(rep(0,18), unlist(lineups))
+  
+  inning <- 0
+  repeat{
+    
+    inning <- inning + 1
+    
+    for(half in c("top","bottom")){
+      bat <- if(half == "top") "away" else "home"
+      fld <- if(half == "bottom") "home" else "away"
+      
+      if(half == "bottom" && inning >= 9 && runs[["home"]] > runs[["away"]]) next
+      outs <- 0
+      b1 <- 0
+      b2 <- 0
+      b3 <- 0
+      if(inning > 9) b2 <- 1
+      
+      while(outs < 3){
+        new_pitcher <- get_bullpen_decision(pitcher[[fld]],
+                                            pitch_count[[fld]],
+                                            inning)
+        if(new_pitcher != pitcher[[fld]]) {
+          pitcher[[fld]] <- new_pitcher
+          pitch_count[[fld]] <- 0
+          bullpen_entries[[length(bullpen_entries) + 1]] <- data.frame(team = team_name[[fld]], inning_entered = inning)
+        }
+        
+        
+        batter <- lineups[[bat]][lineup_idx[[bat]]]
+        res <- sample(OUTCOMES, size = 1, prob = matchup_prob(batter,pitcher[[fld]]))
+        pitch_count[[fld]] <- pitch_count[[fld]] + 1 + rpois(1, 2.9)
+        
+        
+        if(res == "strikeout"){
+          outs <- outs + 1
+          strikeouts[[fld]] <- strikeouts[[fld]] + 1
+        } else if(res == "out"){
+          outs <- outs + 1
+        } else if(res == "walk"){
+          if(b1 == 1) {
+            if(b2 == 1){
+              if(b3 == 1) runs[[bat]] <- runs[[bat]] + 1
+              b3 <- 1
+            }
+            b2 <- 1
+          }
+          b1 <- 1
+        } else{
+          hits[[bat]] <- hits[[bat]] + 1
+          points[[batter]] <- points[[batter]] + hit_values[[res]]
+          
+          if(res == "single"){
+            runs[[bat]] <- runs[[bat]] + b3 + b2
+            b3 <- b1; b2 <- 0; b1 <- 1
+          } else if(res == "double"){
+            runs[[bat]] <- runs[[bat]] + b3 + b2
+            b3 <- b1; b2 <- 1; b1 <- 0
+          } else if(res == "triple"){
+            runs[[bat]] <- runs[[bat]] + b3 + b2 + b1
+            b3 <- 1; b2 <- 0; b1 <- 0
+          } else{
+            runs[[bat]] <- runs[[bat]] + 1 + b3 + b2 + b1
+            b3 <- 0; b2 <- 0; b1 <- 0
+          }
+        }
+        lineup_idx[[bat]] <- lineup_idx[[bat]] %% 9 + 1
+        
+        
+        if(half == "bottom" && inning >= 9 && runs[["home"]] > runs[["away"]]) break
+        
+      }
+    }
+    
+    if (inning >= 9 && runs[["away"]] != runs[["home"]]) break
+  }
+  list(winner = if(runs[["away"]] > runs[["home"]])"away" else "home",
+       runs = runs, hits = hits, strikeouts = strikeouts, innings = inning, bullpen = bind_rows(bullpen_entries), points = points)
+}
+set.seed(1)
+str(simulate_game("TOR", "LAD","Trey Yesavage", "Blake Snell"), max.level = 1)
+
+```
+
+
+```{r}
+simulate_world_series <- function(n = 1000){
+  series_out <- vector("list", n)
+  box_out <- vector("list", n)
+  bullpen_out <- vector("list", n)
+  mvp_out <- character(n)
+  
+  lad_rotation <- c(LAD_SP, LAD_SP[1:3])
+  tor_rotation <- c(TOR_SP, TOR_SP[1:3])
+  all_players <- c(LAD_SL, TOR_SL)
+  
+  for(i in seq_len(n)){
+    lad_wins <- 0
+    tor_wins <- 0
+    series_points <- setNames(rep(0, length(all_players)), all_players)
+    games <- vector("list", 7)
+    bp <- vector("list", 7)
+    
+    for(g in 1:7){
+      lad_home <- g %in% c(3,4,5)
+      away_team <- if(lad_home) "TOR" else "LAD"
+      home_team <- if(lad_home) "LAD" else "TOR"
+      away_starter <- if(lad_home) tor_rotation[g] else lad_rotation[g]
+      home_starter <- if(lad_home) lad_rotation[g] else tor_rotation[g]
+      res <- simulate_game(away_team, home_team, away_starter, home_starter)
+      games[[g]] <- tibble(sim_id = i, game_num = g,
+                           away_team = away_team, home_team = home_team, away_runs = res$runs[["away"]], away_hits = res$hits[["away"]],
+                           home_runs = res$runs[["home"]],
+                           home_hits = res$hits[["home"]],
+                           away_strikeouts = res$strikeouts[["away"]],
+                           home_strikeouts = res$strikeouts[["home"]],
+                           innings = res$innings)
+      bp[[g]] <- mutate(res$bullpen, sim_id = i, game_num = g)
+      series_points[names(res$points)] <- series_points[names(res$points)] + res$points
+      
+      winner_team <- if(res$winner == "away") away_team else home_team
+      if(winner_team == "LAD") lad_wins <- lad_wins + 1 else tor_wins <- tor_wins + 1
+      if(lad_wins == 4 || tor_wins == 4) break
+    }
+    series_winner <- if(lad_wins == 4) "LAD" else "TOR"
+    winner_pool <- if (series_winner == "LAD") LAD_SL else TOR_SL
+    
+    series_out[[i]] <- tibble(sim_id = i, winner = series_winner, games_played = g)
+    box_out[[i]] <- bind_rows(games)
+    bullpen_out[[i]] <- bind_rows(bp)
+    mvp_out[i] <- names(which.max(series_points[winner_pool]))
+  }
+  list(series = bind_rows(series_out),
+       box = bind_rows(box_out),
+       bullpen = bind_rows(bullpen_out),
+       mvp = tibble(player = mvp_out))
+}
+
+set.seed(2025)
+n_sims <- 1000
+
+
+sim_outputs <- simulate_world_series(n = n_sims)
+
+
+
+```
+
+```{r}
+sim_outputs$series %>% count(winner) %>% mutate(pct = n / sum(n))
+
+sim_outputs$series %>% count(games_played) %>% mutate(pct = n / sum(n))
+
+sim_outputs$box %>%
+  group_by(game_num) %>%
+  summarize(avg_run_diff = mean(home_runs - away_runs))
+
+sim_outputs$box %>%
+  summarize(avg_runs_away = mean(away_runs), avg_runs_home = mean(home_runs), avg_hits = mean(away_hits + home_hits), avg_ks = mean(away_strikeouts + home_strikeouts), avg_run_diff = mean(home_runs - away_runs),
+            pct_extra_innings = mean(innings > 9))
+
+sim_outputs$mvp %>% count(player, sort = TRUE) %>% mutate(pct = n/ sum(n))
+
+sim_outputs$bullpen %>% count(team, inning_entered)
+
+```
+
+
+```{r}
+# RESULTS & ANALYSIS
+
+# The results I got from the simulation are really interesting and the outcomes have many similarities to the World Series that actually happened. For background information, the actual World Series went into a 7th game and the Dodgers ended up winning it in extra innings. Looking at the simulation, there was only a 10.4% chance the simulation was going to be a series sweep in either direction. There was also only a 25.7% chance it was going to end in 5 games. The series going to 6 or 7 games had the highest probability with a 31.4% chance of 6 games and a 32.5% chance of 7 games. Moving onto win percentage, out of the 1000 game simulation, the Los Angeles Dodgers won 502 games and the Toronto Blue Jays won the remaining 498. This gives the Dodgers a 50.2% chance of winning and the Blue Jays a 49.8% chance of winning. This would make sense if the series went into 7 games, you would expect the teams to be almost exactly evenly matched. 
+
+# Looking at the MVP race, the winner has almost always been on the winning team. With that being said, if Toronto would've won the simulation, George Springer had a 16.7% chance of being the MVP which was the most out of all players from both teams. The player that would win it from the Dodgers was Shohei Ohtani who had a 14.6% chance of being the MVP. The actual 2025 World Series MVP was Yoshinobu Yamamoto. In this simulation I did not incorporate pitchers into the MVP race, I only incorporated players in the lineups. 
+
+# Moving onto the bullpen usage. Both teams had a very high probability of going to the bullpen in the sixth inning. Both teams next highest probability was going to the bullpen in the 5th inning. The one thing that surprised me was that both teams had one instance of going to the bullpen in the 2nd inning in the simulation. However, when I was putting the lineups together, I did notice that Shohei Ohtani only threw 2 innings in his outing in the world series so there's definitely a chance it could happen. 
+
+# The average run differential per game was an interesting find to me. The simulation had the away team scoring more runs in all games but game 7. Each game one through six have negative run differentials meaning the away team won. If this was the case, Toronto would've won the simulation World Series because they were at home the 7th game and the only game the average run differential was positive. Looking at the averages from the box scores too, the average number of runs for the away team was 4.57 and the average number of runs for the home team was 4.18. There was an average of 17 hits per game between both teams as well as an average of just under 17 strikeouts combined. Looking at the actual World Series, the away teams scored an average of 4.86 runs while the home teams scored an average of 3.17 runs. 
+
+# One thing I played around with in the simulation was how many games each team was at home. If the Dodgers would've had home field advantage, their win probability went up to around 0.64 and had the highest probability of the series going 6 games. With that being said, one cool takeaway I had from this simulation is that home field advantage really does matter. Even for Toronto, by them having home field advantage, their win probability increased and got them to almost a 50% chance of winning instead of a 35% chance of winning. Another cool takeaway I had from this simulation was how many lineup combinations teams have available. Before starting, I looked up which positions the hitters had been in the lineup throughout the regular season and based their allowed positions on that.
+
+# I was genuinely surprised how many similarities there was to the actual World Series that happened including the series going 7 games. To wrap things up, based on the simulation results, the Los Angeles Dodgers would've won the World Series in 7 games with Shohei Ohtani being the MVP if it were a position player. One thing to note is that I use data from statcast by scraping it. I used the full 2025 regular season, cutting the data off before the postseason started. 
+
+```
+
+
